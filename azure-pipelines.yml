@@ -1,0 +1,140 @@
+parameters: 
+  - name: environment
+    displayName: parameter
+    type: string
+    values:
+    - dev
+    - prod
+    default: dev
+trigger: none
+pool: git-pool
+stages:
+  - stage: SecurityScanning
+    jobs:
+    - job: ScanningTools
+      steps: 
+      - task: tfsec@1
+        displayName: TF SEC
+        inputs:
+          version: 'v1.26.0'
+          dir: '$(System.DefaultWorkingDirectory)'
+
+      - task: PowerShell@2
+        displayName: CHECKOV
+        continueOnError: true
+        inputs:
+          targetType: 'inline'
+          script: 'checkov -d "$(System.DefaultWorkingDirectory)" -o junitxml > checkov-scan.xml'
+      
+      - task: PublishTestResults@2
+        displayName: RESULT PUBLISH
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'checkov-scan.xml'
+          testRunTitle: 'checkovscan'
+      
+      - task: PowerShell@2
+        displayName: TERRA SCAN
+        continueOnError: true
+        inputs:
+          targetType: 'inline'
+          script: 'terrascan scan -d "$(System.DefaultWorkingDirectory)" -o junit-xml > terrscanresult.xml'
+      
+      - task: PublishTestResults@2
+        displayName: TERRA RESULT PUBLISH
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'terrscanresult.xml'
+          testRunTitle: 'terrascan'
+      
+      - task: CmdLine@2
+        displayName: TF LINT
+        continueOnError: true
+        inputs:
+          script: 'tflint --chdir="$(System.DefaultWorkingDirectory)" --recursive -f junit > tflintscan.xml'
+      
+      - task: PublishTestResults@2
+        displayName: RESULT PUBLISH
+        inputs:
+          testResultsFormat: 'JUnit'
+          testResultsFiles: 'tflintscan.xml'
+          testRunTitle: 'tflintscan'
+      
+  - stage: InfraCost
+    displayName: COST ESTIMATION
+    jobs:
+    - job: CostScanning
+      steps:
+      - task: PowerShell@2
+        displayName: PRECOST SCANNING
+        inputs:
+          targetType: 'inline'
+          script: 'infracost breakdown --path $(System.DefaultWorkingDirectory)'
+  - stage: sonarqube
+    jobs:
+      - job: SonarQube
+        steps:
+        - task: SonarQubePrepare@8
+          inputs:
+            SonarQube: 'sonarqube-svc'
+            scannerMode: 'cli'
+            configMode: 'manual'
+            cliProjectKey: 'sqp_424a54a61a598b34b4317d6740ae51aebfa115ac'
+            cliSources: '$(System.DefaultWorkingDirectory)'
+            extraProperties: |
+              sonar.scanner.SkipBranchDetection=true
+              sonar.exclusions=**/.terraform/**,**/*.tfstate
+        - task: SonarQubeAnalyze@8
+          inputs:
+            jdkversion: 'JAVA_HOME_17_X64'
+        - task: SonarQubePublish@8
+          inputs:
+            pollingTimeoutSec: '300'
+
+  - stage: TerraformInitAndPlan
+    jobs:
+    - job: Initplan
+      steps:
+      - task: TerraformInstaller@1
+        inputs:
+          terraformVersion: 'latest'
+      - task: TerraformTask@5
+        inputs:
+          provider: 'azurerm'
+          command: 'init'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/env/${{ parameters.environment }}'
+          backendServiceArm: 'new-svc'
+          backendAzureRmStorageAccountName: 'backendstrg'
+          backendAzureRmContainerName: 'strg'
+          backendAzureRmKey: '${{ parameters.environment }}'
+      - task: TerraformTask@5
+        inputs:
+          provider: 'azurerm'
+          command: 'validate'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/env/${{ parameters.environment }}'
+      - task: TerraformTask@5
+        inputs:
+          provider: 'azurerm'
+          command: 'plan'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/env/${{ parameters.environment }}'
+          environmentServiceNameAzureRM: 'new-svc'
+  - stage: TerraformApply
+    dependsOn: TerraformInitAndPlan
+    jobs:
+    - job: Apply
+      steps:
+      - task: TerraformTask@5
+        inputs:
+          provider: 'azurerm'
+          command: 'init'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/env/${{ parameters.environment }}'
+          backendServiceArm: 'new-svc'
+          backendAzureRmStorageAccountName: 'backendstrg'
+          backendAzureRmContainerName: 'strg'
+          backendAzureRmKey: '${{ parameters.environment }}'
+      - task: TerraformTask@5
+        inputs:
+          provider: 'azurerm'
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/env/${{ parameters.environment }}'
+          environmentServiceNameAzureRM: 'new-svc'
